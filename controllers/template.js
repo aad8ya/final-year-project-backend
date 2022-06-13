@@ -52,7 +52,10 @@ import {
 import { PublicKey } from "@hashgraph/cryptography";
 import dotenv from "dotenv";
 import { FileCreateTransaction } from "@hashgraph/sdk";
+import { splitSync } from "node-split";
+import { request } from "http";
 
+// Gets the template, substitutes field values with data and writes an image to the filesystem buffer.
 export const getTemplateImage = (templateId, fields) => {
   return new Promise((resolve, reject) => {
     let fontDir = "";
@@ -127,11 +130,12 @@ export const getTemplateImage = (templateId, fields) => {
   });
 };
 
+// Read the generated certificate from the filesystem buffer and write it as a .jpg image, and upload to firebase storage.
 export const createCertificate = (req, res) => {
   let templateId = req.body.templateId;
   let fields = req.body.fields;
   let certificateName = `${req.body.receiverName}_${makeid(24)}.jpg`;
-  let certificateRef = `${req.body.uid}/certificates/${certificateName}`;
+  let certificateRef = `/certificates/${certificateName}`;
   getTemplateImage(templateId, fields)
     .then((buffer) => {
       console.log("Buffer created");
@@ -146,6 +150,7 @@ export const createCertificate = (req, res) => {
       return addDoc(collection(db, "certificates"), {
         uid: req.body.uid,
         name: certificateName,
+        isShareable: req.body.isShareable,
         fields,
         templateId,
         createdAt: new Date(),
@@ -164,6 +169,7 @@ export const createCertificate = (req, res) => {
     });
 };
 
+// Return fields available in a template
 export const getFields = (req, res) => {
   getTemplateFields(req.params.id)
     .then((fields) => {
@@ -193,6 +199,7 @@ export const getTemplateFields = (templateId) => {
   });
 };
 
+// Generate a unique fileID for use with Hedera FileService
 const makeid = (length) => {
   let result = "";
   let characters =
@@ -203,109 +210,60 @@ const makeid = (length) => {
   }
   return result;
 };
-export const createCertificates = async (req, res) => {
-  const myAccountId = process.env.MY_ACCOUNT_ID;
-  const myPrivateKey = process.env.MY_PRIVATE_KEY;
 
-  if (myAccountId == null || myPrivateKey == null) {
-    throw new Error(
-      "Environment variables myAccountId and myPrivateKey must be present"
-    );
-  }
-  const client = await Client.forTestnet().setOperator(
-    AccountId.fromString(myAccountId),
-    PrivateKey.fromString(myPrivateKey)
-  );
-  let templateId = req.body.templateId;
-  let fields = req.body.fields;
-  let certificateName = `${req.body.receiverName}_${makeid(24)}.jpg`;
-  let certificateRef = `${req.body.uid}/certificates/${certificateName}`;
-  getTemplateImage(templateId, fields)
-    .then(async (buffer) => {
-      console.log("Buffer created");
+// Read image from buffer, and upload to Hedera Fileservice.
+export const createHederaFile = async (req, res) => {
+  try {
+    // Init Hedera Client from SDK
+    const HederaClient = Client.forTestnet();
+    HederaClient.setOperator(process.env.OPERATOR_ID, process.env.OPERATOR_KEY);
+    HederaClient.setDefaultMaxTransactionFee(new Hbar(2));
+
+    // Generate Image and write to a .jpg file from buffer
+    const templateId = req.body.templateId;
+    const fields = req.body.fields;
+    let certificateName = `${req.body.receiverName}_${makeid(24)}.jpg`;
+    let certificateRef = `/certificates/${certificateName}`;
+
+    await getTemplateImage(templateId, fields).then(async (buffer) => {
       fs.writeFileSync(`./storage/${certificateName}.jpg`, buffer);
-      let file = fs.readFileSync(`./storage/${certificateName}.jpg`);
-
-      const n = Buffer.byteLength(file);
-      console.log("n" + n);
-      let fileid = null;
-      for (let i = 0; i < n; i += 1024) {
-        console.log("if " + i);
-        if (i === 0) {
-          var by = [];
-          var len = 0;
-          if (n - i - 1 > 1024) {
-            len = 1024;
-          } else {
-            len = n - i;
-          }
-          var by = file.slice(i, i + len);
-          const transaction = await new FileCreateTransaction()
-            .setKeys([PublicKey.fromString(process.env.filepublickey)]) //A different key then the client operator key
-            .setContents(by)
-            .setMaxTransactionFee(new Hbar(2))
-            .freezeWith(client);
-          console.log("receipt");
-          console.log(receipt);
-          const signTx = transaction.sign(
-            PrivateKey.fromString(process.env.fileprivatekey)
-          );
-          const submitTx = await signTx.execute(client);
-          const receipt = await submitTx.getReceipt(client);
-          fileid = receipt.fileId;
-        } else {
-          var by = [];
-          if (n - i - 1 > 1024) {
-            var len = 1024;
-          } else {
-            var len = n - i;
-          }
-          var by = file.slice(i, i + len);
-          const receipt = new FileAppendTransaction()
-            .setFileId(fileid)
-            .setContents(by)
-            .setMaxTransactionFee(new Hbar(2))
-            .freezeWith(client)
-            .then((transaction) => {
-              const signTx = transaction.sign(
-                PrivateKey.fromString(process.env.fileprivatekey)
-              );
-              return signTx;
-            })
-            .then((signTx) => {
-              const txResponse = signTx.execute(client);
-              return txResponse;
-            })
-            .then((txResponse) => {
-              const receipt = txResponse.getReceipt(client);
-              return receipt;
-            });
-
-          const transactionStatus = receipt.status;
-
-          console.log("Consensus State: " + transactionStatus);
-        }
-      }
-      res.send(JSON.stringify(receipt));
-    })
-    .then((res) => {
-      console.log("File uploaded to HederaFS");
-      let db = getFirestore();
-      return addDoc(collection(db, "certificates"), {
-        uid: req.body.uid,
-        name: certificateName,
-        fields,
-        templateId,
-        createdAt: new Date(),
-        receiverEmail: req.body.receiverEmail,
-        receiverName: req.body.receiverName,
-      });
-    })
-    .then((docRef) => {
-      fs.unlinkSync(`./storage/${certificateName}.jpg`);
-      res.send(certificateRef);
-    })
-    .catch((err) => {
-      res.send(err);
     });
+
+    // Read image from file and split into 6KiB chunks, then upload to Hedera Fileservice
+    const file = fs.readFileSync(`./storage/${certificateName}.jpg`);
+    let chunks = splitSync(file, { bytes: "6K" });
+
+    // Create a FileCreateTransaction for first chunk
+    const transaction = await new FileCreateTransaction()
+      .setKeys([PublicKey.fromString(process.env.FILE_PUBLIC_KEY)])
+      .setContents(chunks[0]) // First Chunk
+      .freezeWith(HederaClient);
+    const signTx = await transaction.sign(
+      PublicKey.fromString(process.env.FILE_PUBLIC_KEY)
+    ); // Sign Transaction
+    const submitTx = await signTx.execute(HederaClient); // Sign with Operator Private key & submit transaction to Hedera
+    const receipt = await submitTx.getReceipt(HederaClient); // Get Transaction Receipt
+    const fileId = receipt.fileId; // Get FileID from receipt
+    console.log("FileID: " + fileId);
+    console.log("Consensus State: " + receipt.status);
+
+    // Create a FileAppendTransaction for subsequent chunks
+    if (chunks.length > 1) {
+      for (let i = 1; i < chunks.length; i++) {
+        const transaction = await new FileAppendTransaction()
+          .setFileId(fileId)
+          .setContents(chunks[i])
+          .freezeWith(HederaClient);
+        const signTx = await transaction.sign(
+          PublicKey.fromString(process.env.FILE_PUBLIC_KEY)
+        ); // Sign Transaction
+        const submitTx = await signTx.execute(HederaClient); // Sign with Operator Private key & submit transaction to Hedera
+        const receipt = await submitTx.getReceipt(HederaClient); // Get Transaction Receipt
+        console.log("Consensus State: " + receipt.status);
+      }
+    }
+  } catch (error) {
+    console.log(error);
+    res.send(error);
+  }
 };

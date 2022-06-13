@@ -1,7 +1,7 @@
 import express from "express";
-import { createCertificate } from "../controllers/template.js";
+import { createCertificate, createHederaFile } from "../controllers/template.js";
 const router = express.Router();
 
-router.post("/one", createCertificate);
+router.post("/one", createHederaFile);
 
 export default router;
