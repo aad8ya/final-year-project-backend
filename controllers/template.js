@@ -217,7 +217,7 @@ export const createHederaFile = async (req, res) => {
     // Init Hedera Client from SDK
     const HederaClient = Client.forTestnet();
     HederaClient.setOperator(process.env.OPERATOR_ID, process.env.OPERATOR_KEY);
-    HederaClient.setDefaultMaxTransactionFee(new Hbar(2));
+    HederaClient;
 
     // Generate Image and write to a .jpg file from buffer
     const templateId = req.body.templateId;
@@ -231,15 +231,17 @@ export const createHederaFile = async (req, res) => {
 
     // Read image from file and split into 6KiB chunks, then upload to Hedera Fileservice
     const file = fs.readFileSync(`./storage/${certificateName}.jpg`);
-    let chunks = splitSync(file, { bytes: "6K" });
+    await uploadBytes(ref(getStorage(), certificateRef), file);
+    let chunks = splitSync(file, { bytes: "1K" });
 
     // Create a FileCreateTransaction for first chunk
     const transaction = await new FileCreateTransaction()
       .setKeys([PublicKey.fromString(process.env.FILE_PUBLIC_KEY)])
       .setContents(chunks[0]) // First Chunk
+      .setMaxTransactionFee(new Hbar(2))
       .freezeWith(HederaClient);
     const signTx = await transaction.sign(
-      PublicKey.fromString(process.env.FILE_PUBLIC_KEY)
+      PrivateKey.fromString(process.env.FILE_PRIVATE_KEY)
     ); // Sign Transaction
     const submitTx = await signTx.execute(HederaClient); // Sign with Operator Private key & submit transaction to Hedera
     const receipt = await submitTx.getReceipt(HederaClient); // Get Transaction Receipt
@@ -253,15 +255,39 @@ export const createHederaFile = async (req, res) => {
         const transaction = await new FileAppendTransaction()
           .setFileId(fileId)
           .setContents(chunks[i])
+          .setMaxTransactionFee(new Hbar(2))
           .freezeWith(HederaClient);
         const signTx = await transaction.sign(
-          PublicKey.fromString(process.env.FILE_PUBLIC_KEY)
+          PrivateKey.fromString(process.env.FILE_PRIVATE_KEY)
         ); // Sign Transaction
         const submitTx = await signTx.execute(HederaClient); // Sign with Operator Private key & submit transaction to Hedera
         const receipt = await submitTx.getReceipt(HederaClient); // Get Transaction Receipt
-        console.log("Consensus State: " + receipt.status);
+        console.log(
+          i + 1 + " / " + chunks.length + "Consensus State: " + receipt.status
+        );
       }
     }
+
+    let db = getFirestore();
+    await addDoc(collection(db, "certificates"), {
+      uid: req.body.uid,
+      name: certificateName,
+      isShareable: req.body.isShareable,
+      fields,
+      templateId,
+      createdAt: new Date(),
+      receiverEmail: req.body.receiverEmail,
+      receiverName: req.body.receiverName,
+      hederaFileId: fileId.toString(),
+      college: req.body.college,
+      batch: req.body.batch,
+      degree: req.body.degree,
+      department: req.body.department,
+      rollNo: req.body.rollNo,
+    });
+
+    fs.unlinkSync(`./storage/${certificateName}.jpg`);
+    res.send(certificateRef);
   } catch (error) {
     console.log(error);
     res.send(error);
